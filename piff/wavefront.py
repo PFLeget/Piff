@@ -76,6 +76,16 @@ class Wavefront(object):
     :param logger:             A logger object for logging debug info. [default: None]
     """
     def __init__(self,wavefront_kwargs,logger=None):
+        """ Parse the input options
+
+        param: wavefront_kwargs    A dictionary holding the options for each
+                                   source of Zernike Coefficients.  Multiple input files are
+                                   allowed, with Dictionaries keyed by 'source1','source2'...
+                                   Each 'sourceN' dictionary has keys:
+                                        'file','zlist','keys','chip','wavelength'
+                                   The key 'survey' applies custom code for the desired survey.
+        param: logger              A logger object for logging debug info. [default: None]
+        """
         logger = galsim.config.LoggerWrapper(logger)
         self.maxnZ = 37            # hardcoded maximum Zernike index, Noll parameterization
         zformatstr = "z%d"         # hardcoded format string for Zernike coefficients

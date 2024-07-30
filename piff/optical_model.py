@@ -221,7 +221,10 @@ class Optical(Model):
                 self.gsparams = galsim.GSParams(**gsparams_kwargs)
 
         # Check that no unexpected parameters were passed in:
-        other_keys = ('sigma', 'mirror_figure_im', 'mirror_figure_scale', 'base_aberrations')
+        other_keys = ('sigma', 'mirror_figure_im', 'mirror_figure_scale')
+        # what is on main at time of conflict 
+        # other_keys = ('sigma', 'mirror_figure_im', 'mirror_figure_scale', 'base_aberrations')
+
         extra_kwargs = [k for k in kwargs if k not in opt_keys + gsparams_keys + other_keys]
         if len(extra_kwargs) > 0:
             raise TypeError('__init__() got an unexpected keyword argument %r'%extra_kwargs[0])
@@ -450,10 +453,17 @@ class Optical(Model):
             prof.append(atmopsf)
 
         # optics
-        optics = self.getOptics(tuple(aberrations))
+        prof.append(self.getOptics(tuple(zernike_coeff)))
 
-        if len(prof) == 0:
-            return optics
-        else:
-            prof.append(optics)
-            return galsim.Convolve(prof, gsparams=self.gsparams)
+        # convolve
+        prof = galsim.Convolve(prof,gsparams=self.gsparams)
+
+        return prof
+        # PFL: what is on main at time I fixed conflict.
+        # optics = self.getOptics(tuple(aberrations))
+
+        # if len(prof) == 0:
+        #     return optics
+        # else:
+        #     prof.append(optics)
+        #     return galsim.Convolve(prof, gsparams=self.gsparams)
