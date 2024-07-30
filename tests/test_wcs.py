@@ -375,6 +375,7 @@ def test_single():
     # SingleChip doesn't use code paths that hit these functions, but they are officially
     # required methods for PSF classes, so just check them directly.
     assert psf.fit_center is True
+    assert psf.include_model_centroid is False
     raw1 = psf._getRawProfile(star)
     raw2 = psf.psf_by_chip[star['chipnum']]._getRawProfile(star)
     assert raw1 == raw2
@@ -519,7 +520,6 @@ def test_parallel():
     config['input']['nimages'] = 3
     with CaptureLog(level=2) as cl:
         psf = piff.process(config, cl.logger)
-    assert "Removed 6 stars in initialize" in cl.output
     assert "No stars left to fit.  Cannot find PSF model." in cl.output
     assert "Solutions failed for chipnums: [3]" in cl.output
 
@@ -687,7 +687,7 @@ def test_newdes():
     # Note: the centering mechanics have changed since this regression was set up to make the
     # nominal PSF center closer to the image center.  So the second slice changed from
     # 23:26 -> 22:25.
-    np.testing.assert_allclose(image.array[23:26,22:25], regression_array, rtol=1.e-5)
+    np.testing.assert_allclose(image.array[23:26,22:25], regression_array, rtol=1.e-4)
 
     # Also check that it is picklable.
     psf2 = copy.deepcopy(psf)

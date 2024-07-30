@@ -37,6 +37,16 @@ class PixelGrid(Model):
     are determined from the pixelated model.  Any galsim.Interpolant type is allowed.
     The default interpolant is galsim.Lanczos(7)
 
+    The following initialization methods are available for the ``init`` parameter.
+
+    * hsm           Start with flux and size values that match the hsm moments of the star.
+    * zero          Start with flux = 1.e-6 x the hsm flux.
+    * delta         Start with size = 1.e-6 x the hsm size.
+
+    All initialization methods start with zero shear and zero centroid offset.
+
+    Use type name "PixelGrid" in a config field to use this model.
+
     :param scale:       Pixel scale of the PSF model (in arcsec)
     :param size:        Number of pixels on each side of square grid.
     :param interp:      An Interpolant to be used [default: Lanczos(7)]
@@ -44,6 +54,10 @@ class PixelGrid(Model):
                         PSF fitting will marginalize over stellar position.  If False, stellar
                         position is fixed at input value and the fitted PSF may be off-center.
                         [default: True]
+    :param init:        Initialization method.  [default: None, which uses hsm unless a PSF
+                        class specifies a different default.]
+    :param fit_flux:    If True, the PSF model will include the flux value.  This is useful when
+                        this model is an element of a Sum composite PSF. [default: False]
     :param logger:      A logger object for logging debug info. [default: None]
     """
 
@@ -53,7 +67,8 @@ class PixelGrid(Model):
                                  # current centroid of the model.  This way on later iterations,
                                  # the model will be close to centered.
 
-    def __init__(self, scale, size, interp=None, centered=True, logger=None):
+    def __init__(self, scale, size, interp=None, centered=True, init=None, fit_flux=False,
+                 logger=None):
 
         logger = galsim.config.LoggerWrapper(logger)
         logger.debug("Building Pixel model with the following parameters:")
@@ -61,6 +76,8 @@ class PixelGrid(Model):
         logger.debug("size = %s",size)
         logger.debug("interp = %s",interp)
         logger.debug("centered = %s",centered)
+        logger.debug("init = %s",init)
+        logger.debug("fit_flux = %s",fit_flux)
 
         self.scale = scale
         self.size = size
@@ -69,6 +86,8 @@ class PixelGrid(Model):
         elif isinstance(interp, str): interp = eval(interp)
         self.interp = interp
         self._centered = centered
+        self._init = init
+        self._fit_flux = fit_flux
 
         # We will limit the calculations to |u|, |v| <= maxuv
         self.maxuv = (self.size+1)/2. * self.scale
@@ -83,7 +102,10 @@ class PixelGrid(Model):
             'size' : size,
             'centered' : centered,
             'interp' : repr(self.interp),
+            'init': init,
+            'fit_flux': fit_flux,
         }
+        self.set_num(None)
 
         if size <= 0:
             raise ValueError("Non-positive PixelGrid size {:d}".format(size))
@@ -91,34 +113,54 @@ class PixelGrid(Model):
         self._nparams = size*size
         logger.debug("nparams = %d",self._nparams)
 
-    def initialize(self, star, logger=None):
+    def initialize(self, star, logger=None, default_init=None):
         """Initialize a star to work with the current model.
 
-        :param star:    A Star instance with the raw data.
-        :param logger:  A logger object for logging debug info. [default: None]
+        :param star:            The Star to initialize.
+        :param logger:          A logger object for logging debug info. [default: None]
+        :param default_init:    The default initilization method if the user doesn't specify one.
+                                [default: None]
 
         :returns: a star instance with the appropriate initial fit values
         """
-        data, weight, u, v = star.data.getDataVector()
+        logger = galsim.config.LoggerWrapper(logger)
+        init = self._init if self._init is not None else default_init
+        if init is None: init = 'hsm'
+        logger.debug("initializing PixelGrid with method %s",init)
 
-        # Calculate the second moment to initialize an initial Gaussian profile.
-        # hsm returns: flux, x, y, sigma, g1, g2, flag
-        sigma = star.hsm[3]
+        if init == 'hsm' or init == 'zero':
+            # Calculate the second moment to initialize an initial Gaussian profile.
+            # hsm returns: flux, x, y, sigma, g1, g2, flag
+            sigma = star.hsm[3]
 
-        # Create an initial parameter array using a Gaussian profile.
-        u = np.arange( -self._origin, self.size-self._origin) * self.scale
-        v = np.arange( -self._origin, self.size-self._origin) * self.scale
-        rsq = (u*u)[:,np.newaxis] + (v*v)[np.newaxis,:]
-        gauss = np.exp(-rsq / (2.* sigma**2))
-        params = gauss.ravel()
+            # Create an initial parameter array using a Gaussian profile.
+            u = np.arange( -self._origin, self.size-self._origin) * self.scale
+            v = np.arange( -self._origin, self.size-self._origin) * self.scale
+            rsq = (u*u)[:,np.newaxis] + (v*v)[np.newaxis,:]
+            gauss = np.exp(-rsq / (2.* sigma**2))
+            params = gauss.ravel()
 
-        # Normalize to get unity flux
-        params /= np.sum(params)
+            # Normalize to get unity flux
+            params /= np.sum(params)
 
-        fit = star.fit.withNew(params=params)
+            if init == 'zero':
+                # Setting to exactly 0 doesn't work, since InterpolatedImages need to have a
+                # valid flux.  But 1.e-10 x smaller than the image should be a good starting
+                # point for most uses of the zero initialization.
+                params *= 1.e-10
+
+        elif init == 'delta':
+            params = np.zeros(self.size**2)
+            icenter = self._origin * self.size + self._origin
+            params[icenter] = 1.0
+
+        else:
+            raise ValueError("init = %s is invalid for PixelGrid"%init)
+
+        fit = star.fit.newParams(params=params, num=self._num)
         return Star(star.data, fit)
 
-    def fit(self, star, logger=None, convert_func=None):
+    def fit(self, star, logger=None, convert_func=None, draw_method=None):
         """Fit the Model to the star's data to yield iterative improvement on its PSF parameters
         and uncertainties.
 
@@ -127,9 +169,14 @@ class PixelGrid(Model):
         :param convert_func:    An optional function to apply to the profile being fit before
                                 drawing it onto the image.  This is used by composite PSFs to
                                 isolate the effect of just this model component. [default: None]
+        :param draw_method:     The method to use with the GalSim drawImage command to determine
+                                the residuals. [PixelGrid always uses 'no_pixel'; this parameter
+                                is only present for API compatibility.  It must be either None
+                                or 'no_pixel'.]
 
         :returns: a new Star instance with updated fit information
         """
+        assert draw_method in (None, 'no_pixel')
         logger = galsim.config.LoggerWrapper(logger)
         # Get chisq Taylor expansion for linearized model
         star1 = self.chisq(star, logger=logger, convert_func=convert_func)
@@ -169,13 +216,14 @@ class PixelGrid(Model):
             logger.info("Caught error %s making params_var.  Setting all to 1.e100",e)
             params_var = np.ones_like(dparam) * 1.e100
 
-        star = Star(star1.data, star1.fit.withNew(params=star1.fit.params + dparam,
-                                                  params_var=params_var,
-                                                  chisq=new_chisq))
+        params = star.fit.get_params(self._num)
+        params += dparam
+        star = Star(star1.data, star1.fit.newParams(params=params, params_var=params_var,
+                                                    num=self._num, chisq=new_chisq))
         self.normalize(star)
         return star
 
-    def chisq(self, star, logger=None, convert_func=None):
+    def chisq(self, star, logger=None, convert_func=None, draw_method=None):
         """Calculate dependence of chi^2 = -2 log L(D|p) on PSF parameters for single star.
         as a quadratic form chi^2 = dp^T AT A dp - 2 bT A dp + chisq,
         where dp is the *shift* from current parameter values.  Returned Star
@@ -187,15 +235,20 @@ class PixelGrid(Model):
         :param convert_func:    An optional function to apply to the profile being fit before
                                 drawing it onto the image.  This is used by composite PSFs to
                                 isolate the effect of just this model component. [default: None]
+        :param draw_method:     The method to use with the GalSim drawImage command to determine
+                                the residuals. [PixelGrid always uses 'no_pixel'; this parameter
+                                is only present for API compatibility.  It must be either None
+                                or 'no_pixel'.]
 
         :returns: a new Star instance with updated fit parameters. (esp. A,b)
         """
+        assert draw_method in (None, 'no_pixel')
         logger = galsim.config.LoggerWrapper(logger)
         logger.debug('Start chisq function')
-        logger.debug('initial params = %s',star.fit.params)
+        logger.debug('initial params = %s',star.fit.get_params(self._num))
 
         data, weight, u, v = star.data.getDataVector()
-        prof = self.getProfile(star.fit.params)._shift(*star.fit.center)
+        prof = self.getProfile(star.fit.get_params(self._num))._shift(*star.fit.center)
         logger.debug('prof.flux = %s',prof.flux)
 
         # My idea for doing composite functions is that at this point in the calculation, we
@@ -212,6 +265,7 @@ class PixelGrid(Model):
 
         if convert_func is not None:
             prof = convert_func(prof)
+            logger.debug(f'converted prof = {prof}')
 
         # Adjust the image now so that we can draw it in pixel coordinates, rather than letting
         # galsim.drawImage do the adjustment each time for each component, which would be
@@ -222,10 +276,16 @@ class PixelGrid(Model):
         image.wcs = galsim.PixelScale(1.0)
 
         # Draw the profile.
-        # Be careful here.  If prof was converted to something that isn't analytic in
-        # real space, this will need to be _drawFFT.
         prof = star.data.local_wcs.profileToImage(prof, offset=offset)
-        prof._drawReal(image)
+        if (convert_func is None or
+                (prof.is_analytic_x and not isinstance(prof, galsim.Convolution))):
+            draw_real = True
+            prof._drawReal(image)
+        else:
+            # If the convert func turns this into a Convolution, or something else that isn't
+            # analytic in real space, then use FFT drawing.
+            draw_real = False
+            prof.drawFFT(image)
         logger.debug('drawn flux = %s',image.array.sum())
         model = image.array.ravel() * star.fit.flux
 
@@ -257,27 +317,26 @@ class PixelGrid(Model):
             # In this case we need the basis_profile to have the right scale (rather than
             # incorporate it into the jacobian) so that convert_func will have the right size.
             basis_profile = basis_profile.dilate(self.scale)
+            logger.debug(f'basis_profile = {basis_profile}')
             # Find the net shift from the star.fit.center and the offset.
             jac = star.data.local_wcs.jacobian().inverse().getMatrix()
+            jac_det = abs(jac[0,0]*jac[1,1] - jac[0,1]*jac[1,0])
             dx = jac[0,0]*u0 + jac[0,1]*v0 + offset.x
             dy = jac[1,0]*u0 + jac[1,1]*v0 + offset.y
             du = du.ravel() * self.scale
             dv = dv.ravel() * self.scale
             for k, duk, dvk in zip(range(self._nparams), du,dv):
-                # This implementation removes most of the overhead, and is still relatively
-                # straightforward.
-                # The one wrinkle is that if the net profile is no longer analytic in real space,
-                # we'll need a call to _drawFFT rather than _drawReal.  That would be a lot slower
-                # I think, so we may want to limit convolutions in conjunction with PixelGrid.
-                # (That's less of an issue for models with few paramters.)
-
-                basis_profile_k = basis_profile._shift(duk,dvk)
-                basis_profile_k = convert_func(basis_profile_k)
-                # TODO: If the convert_func has transformed the profile into something that is
-                # not analytic_x, then we need to do the _drawFFT version here.
-                basis_profile_k._drawReal(image, jac, (dx,dy), 1.)
+                prof = basis_profile._shift(duk,dvk)
+                prof = convert_func(prof)
+                if draw_real:
+                    prof._drawReal(image, jac, (dx,dy), 1.)
+                    # Equivalent to:
+                    #prof = galsim._Transform(prof, jac, (dx,dy), 1./jac_det)
+                    #prof.drawReal(image)
+                else:
+                    prof = galsim._Transform(prof, jac, (dx,dy), 1./jac_det)
+                    prof.drawFFT(image)
                 A[:,k] = image.array.ravel()[mask]
-
         else:
             if 0:
                 # When we don't have the convert_func step, this calculation can be sped up
@@ -325,7 +384,7 @@ class PixelGrid(Model):
                 v = v[mask] / self.scale
                 ui,uf = np.divmod(u,1)
                 vi,vf = np.divmod(v,1)
-                xr = self.interp.xrange
+                xr = int(np.ceil(self.interp.xrange))
                 # Note arguments are basis pixel position minus image pixel position.
                 # Hence the minus sign in front of uf.
                 argu = -uf[:,np.newaxis] + np.arange(-xr+1,xr+1)[np.newaxis,:]
@@ -419,8 +478,9 @@ class PixelGrid(Model):
         :returns: a galsim.GSObject instance
         """
         im = galsim.Image(params.reshape(self.size,self.size), scale=self.scale)
+        flux = None if self._fit_flux else 1.
         return galsim.InterpolatedImage(im, x_interpolant=self.interp,
-                                        use_true_center=False, flux=1.)
+                                        use_true_center=False, flux=flux)
 
     def _getBasisProfile(self):
         if not hasattr(self, '_basis_profile'):
@@ -444,7 +504,8 @@ class PixelGrid(Model):
         # Backwards compatibility check.
         # We used to only keep nparams - 1 or nparams - 3 values in fit.params.
         # If this is the case, fix it up to match up with our new convention.
-        nparams1 = len(star.fit.params)
+        params = star.fit.get_params(self._num)
+        nparams1 = len(params)
         nparams2 = self.size**2
         if nparams1 < nparams2:
             # Difference is either 1 or 3.  If not, something very weird happened.
@@ -460,7 +521,7 @@ class PixelGrid(Model):
                 #       this branch.
                 mask[origin[0]+1,origin[1]] = False
                 mask[origin[0],origin[1]+1] = False
-            temp[mask] = star.fit.params
+            temp[mask] = params
 
             # Now populate the masked pixels
             delta_u = np.arange(-origin[0], self.size-origin[0])
@@ -475,10 +536,14 @@ class PixelGrid(Model):
             # Note: This uses the old scheme of sb normalization, not flux normalization.
             temp[origin] = 1./self.pixel_area - np.sum(temp)
 
-            star.fit.params = temp.flatten()
+            params = temp.flatten()
+            star.fit.params = None  # Remove the old one with the wrong size, so newParams
+                                    # doesn't complain about the size changing.
 
         # Normally this is all that is required.
-        star.fit.params /= np.sum(star.fit.params)
+        if not self._fit_flux:
+            params /= np.sum(params)
+            star.fit = star.fit.newParams(params, num=self._num)
 
     @classmethod
     def _fix_kwargs(cls, kwargs):

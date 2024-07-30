@@ -16,10 +16,6 @@
 .. module:: model
 """
 
-import numpy as np
-import galsim
-
-from .util import write_kwargs, read_kwargs
 from .star import Star
 
 
@@ -63,6 +59,12 @@ class Model(object):
 
         return model
 
+    def set_num(self, num):
+        """If there are multiple components involved in the fit, set the number to use
+        for this model.
+        """
+        self._num = num
+
     @classmethod
     def __init_subclass__(cls):
         # Classes that don't want to register a type name can either not define _type_name
@@ -92,11 +94,13 @@ class Model(object):
         kwargs['logger'] = logger
         return kwargs
 
-    def initialize(self, star, logger=None):
+    def initialize(self, star, logger=None, default_init=None):
         """Initialize a star to work with the current model.
 
-        :param star:    A Star instance with the raw data.
-        :param logger:  A logger object for logging debug info. [default: None]
+        :param star:            A Star instance with the raw data.
+        :param logger:          A logger object for logging debug info. [default: None]
+        :param default_init:    The default initilization method if the user doesn't specify one.
+                                [default: None]
 
         :returns:       Star instance with the appropriate initial fit values
         """
@@ -126,7 +130,7 @@ class Model(object):
         """
         raise NotImplementedError("Derived classes must define the fit function")
 
-    def draw(self, star, copy_image=True, center=None):
+    def draw(self, star, copy_image=True):
         """Draw the model on the given image.
 
         :param star:        A Star instance with the fitted parameters to use for drawing and a
@@ -134,88 +138,75 @@ class Model(object):
         :param copy_image:  If False, will use the same image object.
                             If True, will copy the image and then overwrite it.
                             [default: True]
-        :param center:      An optional tuple (x,y) location for where to center the drawn profile
-                            in the image. [default: None, which draws at the star's location.]
 
         :returns: a new Star instance with the data field having an image of the drawn model.
         """
-        prof = self.getProfile(star.fit.params).shift(star.fit.center) * star.fit.flux
+        params = star.fit.get_params(self._num)
+        prof = self.getProfile(params).shift(star.fit.center) * star.fit.flux
         if copy_image:
             image = star.image.copy()
         else:
             image = star.image
-        if center is None:
-            center = star.image_pos
-        else:
-            center = galsim.PositionD(*center)
-        prof.drawImage(image, method=self._method, center=center)
+        prof.drawImage(image, method=self._method, center=star.image_pos)
         return Star(star.data.withNew(image=image), star.fit)
 
-    def write(self, fits, extname):
-        """Write a Model to a FITS file.
+    def write(self, writer, name):
+        """Write a Model via a Writer object.
 
         Note: this only writes the initialization kwargs to the fits extension, not the parameters.
 
         The base class implemenation works if the class has a self.kwargs attribute and these
         are all simple values (str, float, or int)
 
-        :param fits:        An open fitsio.FITS object
-        :param extname:     The name of the extension to write the model information.
+        :param writer:      A writer object that encapsulates the serialization format.
+        :param name:        A name to associate with this model in the serialized output.
         """
         # First write the basic kwargs that works for all Model classes
         model_type = self._type_name
-        write_kwargs(fits, extname, dict(self.kwargs, type=model_type))
-
+        writer.write_struct(name, dict(self.kwargs, type=model_type))
         # Now do any class-specific steps.
-        self._finish_write(fits, extname)
+        with writer.nested(name) as w:
+            self._finish_write(w)
 
-    def _finish_write(self, fits, extname):
+    def _finish_write(self, writer):
         """Finish the writing process with any class-specific steps.
 
         The base class implementation doesn't do anything, which is often appropriate, but
         this hook exists in case any Model classes need to write extra information to the
         fits file.
 
-        :param fits:        An open fitsio.FITS object
-        :param extname:     The base name of the extension
+        :param writer:      A writer object that encapsulates the serialization format.
         """
         pass
 
     @classmethod
-    def read(cls, fits, extname):
+    def read(cls, reader, name):
         """Read a Model from a FITS file.
 
         Note: the returned Model will not have its parameters set.  This just initializes a fresh
         model that can be used to interpret interpolated vectors.
 
-        :param fits:        An open fitsio.FITS object
-        :param extname:     The name of the extension with the model information.
+        :param reader:      A reader object that encapsulates the serialization format.
+        :param name:        Name associated with this model in the serialized output.
 
-        :returns: a model built with a information in the FITS file.
+        :returns: a model built with a information in the FITS file
         """
-        assert extname in fits
-        assert 'type' in fits[extname].get_colnames()
-        model_type = fits[extname].read()['type']
-        assert len(model_type) == 1
-        try:
-            model_type = str(model_type[0].decode())
-        except AttributeError:
-            # fitsio 1.0 returns strings
-            model_type = model_type[0]
+        kwargs = reader.read_struct(name)
+        assert kwargs is not None
+        assert 'type' in kwargs
+        model_type = kwargs.pop('type')
 
         # Check that model_type is a valid Model type.
         if model_type not in Model.valid_model_types:
             raise ValueError("model type %s is not a valid Piff Model"%model_type)
         model_cls = Model.valid_model_types[model_type]
 
-        kwargs = read_kwargs(fits, extname)
-        kwargs.pop('type',None)
         if 'force_model_center' in kwargs: # pragma: no cover
             # old version of this parameter name.
             kwargs['centered'] = kwargs.pop('force_model_center')
         model_cls._fix_kwargs(kwargs)
         model = model_cls(**kwargs)
-        model._finish_read(fits, extname)
+        model._finish_read(reader)
         return model
 
     @classmethod
@@ -232,14 +223,13 @@ class Model(object):
         """
         pass
 
-    def _finish_read(self, fits, extname):
+    def _finish_read(self, reader):
         """Finish the reading process with any class-specific steps.
 
         The base class implementation doesn't do anything, which is often appropriate, but
         this hook exists in case any Model classes need to read extra information from the
         fits file.
 
-        :param fits:        An open fitsio.FITS object.
-        :param extname:     The base name of the extension.
+        :param reader:      A reader object that encapsulates the serialization format.
         """
         pass

@@ -64,9 +64,16 @@ def convert_zernikes_des(a_fp):
 
 
 class Wavefront(object):
-    """ This class reads in wavefront data and assigns Zernike coefficients
-        to Stars by interpolation.
+    """
+    This class reads in wavefront data and assigns Zernike coefficients to Stars by interpolation.
 
+    :param wavefront_kwargs:   A dictionary holding the options for each
+                               source of Zernike Coefficients.  Multiple input files are
+                               allowed, with Dictionaries keyed by 'source1','source2'...
+                               Each 'sourceN' dictionary has keys:
+                                    'file','zlist','keys','chip','wavelength'
+                               The key 'survey' applies custom code for the desired survey.
+    :param logger:             A logger object for logging debug info. [default: None]
     """
     def __init__(self,wavefront_kwargs,logger=None):
         """ Parse the input options
@@ -79,7 +86,6 @@ class Wavefront(object):
                                    The key 'survey' applies custom code for the desired survey.
         param: logger              A logger object for logging debug info. [default: None]
         """
-
         logger = galsim.config.LoggerWrapper(logger)
         self.maxnZ = 37            # hardcoded maximum Zernike index, Noll parameterization
         zformatstr = "z%d"         # hardcoded format string for Zernike coefficients
@@ -102,6 +108,7 @@ class Wavefront(object):
         self.zlists = []
         self.chiplists = []
         self.wavelengths = []
+        self.set_num(None)
 
         # loop over input sources
         for isource,kwargs in enumerate(wf_dicts):
@@ -167,6 +174,8 @@ class Wavefront(object):
                     tab = LookupTable2D(xarray, yarray, Z, interpolant='spline')
                     self.interp_objects[(isource,None,iZ)] = tab
 
+    def set_num(self, num):
+        self._num = num
 
     def fillWavefront(self,star_list,wavelength=-1.0,logger=None,addtostars=True):
         """Interpolate wavefront to each star's location, fill wavefront key of star.data.properties

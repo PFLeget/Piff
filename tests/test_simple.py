@@ -288,25 +288,27 @@ def test_single_image():
     np.testing.assert_equal(test_star.fit.params, test_star_list.fit.params)
     np.testing.assert_equal(test_star.image.array, test_star_list.image.array)
 
-    # test copy_image property of drawStar and draw
-    for draw in [psf.drawStar, psf.model.draw]:
-        target_star_copy = psf.interp.interpolate(piff.Star(target.data.copy(), target.fit.copy()))
-        # interp is so that when we do psf.model.draw we have fit.params to work with
+    # test deprecated copy_image=False option for drawStar
+    with np.testing.assert_warns(DeprecationWarning):
+        test_star2 = psf.drawStar(target, copy_image=False)
+    assert test_star.image == test_star2.image
+    with np.testing.assert_warns(DeprecationWarning):
+        test_star3 = psf.drawStarList([target], copy_image=False)[0]
+    assert test_star.image == test_star3.image
 
-        test_star_copy = draw(target_star_copy, copy_image=True)
-        test_star_nocopy = draw(target_star_copy, copy_image=False)
-        # if we modify target_star_copy, then test_star_nocopy should be modified,
-        # but not test_star_copy
-        target_star_copy.image.array[0,0] = 23456
-        assert test_star_nocopy.image.array[0,0] == target_star_copy.image.array[0,0]
-        assert test_star_copy.image.array[0,0] != target_star_copy.image.array[0,0]
-        # however the other pixels SHOULD still be all the same value
-        assert test_star_nocopy.image.array[1,1] == target_star_copy.image.array[1,1]
-        assert test_star_copy.image.array[1,1] == target_star_copy.image.array[1,1]
+    # test copy_image property of psf.model.draw
+    target_star_copy = psf.interp.interpolate(piff.Star(target.data.copy(), target.fit))
 
-        test_star_center = draw(test_star_copy, copy_image=True, center=(x+1,y+1))
-        np.testing.assert_almost_equal(test_star_center.image.array[1:,1:],
-                                       test_star_copy.image.array[:-1,:-1])
+    test_star_copy = psf.model.draw(target_star_copy, copy_image=True)
+    test_star_nocopy = psf.model.draw(target_star_copy, copy_image=False)
+    # if we modify target_star_copy, then test_star_nocopy should be modified,
+    # but not test_star_copy
+    target_star_copy.image.array[0,0] = 23456
+    assert test_star_nocopy.image.array[0,0] == target_star_copy.image.array[0,0]
+    assert test_star_copy.image.array[0,0] != target_star_copy.image.array[0,0]
+    # however the other pixels SHOULD still be all the same value
+    assert test_star_nocopy.image.array[1,1] == target_star_copy.image.array[1,1]
+    assert test_star_copy.image.array[1,1] == target_star_copy.image.array[1,1]
 
     # test that draw works
     test_image = psf.draw(x=target['x'], y=target['y'], stamp_size=config['input']['stamp_size'],
@@ -663,12 +665,12 @@ def test_model():
     # Mock this by pretending that Gaussian is the only subclass of Model.
     filename = os.path.join('input','D00240560_r_c01_r2362p01_piff.fits')
     with mock.patch('piff.Model.valid_model_types', {'Gaussian': piff.Gaussian}):
-        with fitsio.FITS(filename,'r') as f:
-            np.testing.assert_raises(ValueError, piff.Model.read, f, extname='psf_model')
+        with piff.readers.FitsReader.open(filename) as r:
+            np.testing.assert_raises(ValueError, piff.Model.read, r, 'psf_model')
 
     # But normally this file can be read...
-    with fitsio.FITS(filename,'r') as f:
-        model = piff.Model.read(f, extname='psf_model')
+    with piff.readers.FitsReader.open(filename) as r:
+        model = piff.Model.read(r, 'psf_model')
         print(model)
 
     # We don't have any abstract model base classes (as we do for interp for instance),
@@ -711,21 +713,21 @@ def test_interp():
     np.testing.assert_raises(NotImplementedError, interp.interpolateList, [None])
 
     filename1 = os.path.join('output','test_interp.fits')
-    with fitsio.FITS(filename1,'rw',clobber=True) as f:
-        np.testing.assert_raises(NotImplementedError, interp._finish_write, f, extname='interp')
+    with piff.writers.FitsWriter.open(filename1) as w:
+        np.testing.assert_raises(NotImplementedError, interp._finish_write, w.nested('interp'))
     filename2 = os.path.join('input','D00240560_r_c01_r2362p01_piff.fits')
-    with fitsio.FITS(filename2,'r') as f:
-        np.testing.assert_raises(NotImplementedError, interp._finish_read, f, extname='interp')
+    with piff.readers.FitsReader.open(filename2) as r:
+        np.testing.assert_raises(NotImplementedError, interp._finish_read, r.nested('interp'))
 
     # Invalid to read a type that isn't a piff.Interp type.
     # Mock this by pretending that Mean is the only subclass of Interp.
     with mock.patch('piff.Interp.valid_interp_types', {'Mean': piff.Mean}):
-        with fitsio.FITS(filename2,'r') as f:
-            np.testing.assert_raises(ValueError, piff.Interp.read, f, extname='psf_interp')
+        with piff.readers.FitsReader.open(filename2) as r:
+            np.testing.assert_raises(ValueError, piff.Interp.read, r, 'psf_interp')
 
     # But normally this file can be read...
-    with fitsio.FITS(filename2,'r') as f:
-        interp = piff.Interp.read(f, extname='psf_interp')
+    with piff.readers.FitsReader.open(filename2) as r:
+        interp = piff.Interp.read(r, 'psf_interp')
         print(interp)
 
     # BasisInterp is an abstract base class, so it shouldn't be in the list of valid types
@@ -766,6 +768,7 @@ def test_psf():
 
     # Can't do much with a base PSF class
     psf = piff.PSF()
+    psf.set_num(None)
     np.testing.assert_raises(NotImplementedError, psf.parseKwargs, None)
     np.testing.assert_raises(NotImplementedError, psf.interpolateStar, star)
     np.testing.assert_raises(NotImplementedError, psf.interpolateStarList, [star])
@@ -773,9 +776,11 @@ def test_psf():
     np.testing.assert_raises(NotImplementedError, psf.drawStarList, [star])
     np.testing.assert_raises(NotImplementedError, psf._drawStar, star)
     np.testing.assert_raises(NotImplementedError, psf._getProfile, star)
-    np.testing.assert_raises(NotImplementedError, psf.single_iteration, [star], None, None)
+    np.testing.assert_raises(NotImplementedError, psf.single_iteration, [star], None, None, None)
     with np.testing.assert_raises(NotImplementedError):
         psf.fit_center
+    with np.testing.assert_raises(NotImplementedError):
+        psf.include_model_centroid
 
     # initialize_params doesn't do anything, but works
     stars, nremove = psf.initialize_params([star], None)
@@ -789,8 +794,14 @@ def test_psf():
         np.testing.assert_raises(ValueError, piff.PSF.read, filename)
 
     # But normally this file can be read...
-    psf = piff.PSF.read(filename)
-    print(psf)
+    try:
+        import pixmappy
+    except ImportError:
+        # Skip this test, since it requires pixmappy.
+        pass
+    else:
+        psf = piff.PSF.read(filename)
+        print(psf)
 
     # Check that registering new types works correctly
     class NoPSF1(piff.PSF):
@@ -861,6 +872,16 @@ def test_load_images():
     # Read this file back in.  It has the star data, but the images are blank.
     psf2 = piff.read(psf_file, logger)
     assert len(psf2.stars) == 10
+    print('chisq = ',[s.fit.chisq for s in psf2.stars])
+    print('dof = ',[s.fit.dof for s in psf2.stars])
+    print('true chisq = ',[s.fit.chisq for s in psf.stars])
+    print('true dof = ',[s.fit.dof for s in psf.stars])
+    # chisq and dof should be correct
+    np.testing.assert_allclose([s.fit.chisq for s in psf2.stars],
+                               [s.fit.chisq for s in psf.stars])
+    np.testing.assert_allclose([s.fit.dof for s in psf2.stars],
+                               [s.fit.dof for s in psf.stars])
+    # But the images are blank
     for star in psf2.stars:
         np.testing.assert_array_equal(star.image.array, 0.)
 

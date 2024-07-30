@@ -1,24 +1,15 @@
-Changes from version 1.3 to 1.4
+Changes from version 1.4 to 1.5
 ===============================
 
 Output file changes
 --------------------
 
-- Stars that were rejected as outliers are now included in the output file, but flagged with
-  flag_psf=1.
-
 
 API Changes
 -----------
 
-- Deprecated some redundant or potentially unclear type names.
-  * GSObjectModel -> GSObject
-  * GPInterp -> GP or GaussianProcess
-  * kNNInterp -> KNN or KNearestNeighbors
-  * Star -> StarImages
-- Deprecated the include_reserve=True option for outlier rejection.  Now that all objects are
-  preserved in the output file, reserve stars that would have been rejected are marked as such,
-  so you can choose whether or not to use them for any diagnostic tests.
+- Changed the default behavior of the StarImages plot to include the average star and model.
+  To recover the old version without these images, use ``include_ave = False``. (#167)
 
 
 Performance improvements
@@ -29,9 +20,7 @@ Performance improvements
 New features
 ------------
 
-- Added `trust_pos` option in the input field.  This tells Piff not to adjust the star positions
-  when fitting the PSF.
-
+- Added an image of the average star and model in the StarImages output plot. (#167)
 
 
 Bug fixes

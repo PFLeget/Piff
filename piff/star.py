@@ -322,18 +322,18 @@ class Star(object):
             weight = galsim.Image(weight.array, wcs=image.wcs, copy=True, bounds=image.bounds)
 
         # Build the StarData instance
-        data = StarData(image, image_pos, field_pos=field_pos, properties=properties, 
-                        pointing=pointing, weight=weight)        
+        data = StarData(image, image_pos, field_pos=field_pos, properties=properties,
+                        pointing=pointing, weight=weight)
         fit = StarFit(None, flux=flux, center=(0.,0.))
         return cls(data, fit)
 
     @classmethod
-    def write(self, stars, fits, extname):
-        """Write a list of stars to a FITS file.
+    def write(cls, stars, writer, name):
+        """Write a list of stars to a writer object.
 
         :param stars:       A list of stars to write
-        :param fits:        An open fitsio.FITS object
-        :param extname:     The name of the extension to write to
+        :param writer:      A writer object that encapsulates the serialization format.
+        :param name:        A name to associate with these stars in the serialized output.
         """
         # TODO This doesn't write everything out.  Probably want image as an optional I/O.
 
@@ -372,20 +372,32 @@ class Star(object):
         cols.append( [s.data.image.bounds.ymax for s in stars] )
 
         # Now the easy parts of fit:
-        dtypes.extend( [ ('flux', float), ('center', float, 2), ('chisq', float) ] )
-        cols.append( [ s.fit.flux for s in stars ] )
-        cols.append( [ s.fit.center for s in stars ] )
-        cols.append( [ s.fit.chisq for s in stars ] )
+        dtypes.extend( [ ('flux', float), ('center', float, 2), ('chisq', float), ('dof', float), ] )
+        cols.append( [s.fit.flux for s in stars] )
+        cols.append( [s.fit.center for s in stars] )
+        cols.append( [s.fit.chisq for s in stars] )
+        cols.append( [s.fit.dof for s in stars] )
 
         # params might not be set, so check if it is None
+        header = None
         if stars[0].fit.params is not None:
-            dtypes.append( ('params', float, len(stars[0].fit.params)) )
-            cols.append( [ s.fit.params for s in stars ] )
+            params = [s.fit.params for s in stars]
+
+            # params might need to be flattened
+            if stars[0].fit.params_lens is not None:
+                header = {'PARAMS_LENS' : str(stars[0].fit.params_lens)}
+                params = [ StarFit.flatten_params(p) for p in params ]
+
+            dtypes.append( ('params', float, len(params[0])) )
+            cols.append(params)
 
         # params_var might not be set, so check if it is None
         if stars[0].fit.params_var is not None:
-            dtypes.append( ('params_var', float, len(stars[0].fit.params_var)) )
-            cols.append( [ s.fit.params_var for s in stars ] )
+            params_var = [s.fit.params_var for s in stars]
+            if stars[0].fit.params_lens is not None:
+                params_var = [ StarFit.flatten_params(p) for p in params_var ]
+            dtypes.append( ('params_var', float, len(params_var[0])) )
+            cols.append(params_var)
 
         # If pointing is set, write that
         if stars[0].data.pointing is not None:
@@ -394,7 +406,7 @@ class Star(object):
             cols.append( [s.data.pointing.dec / galsim.degrees for s in stars ] )
 
         data = np.array(list(zip(*cols)), dtype=dtypes)
-        fits.write_table(data, extname=extname)
+        writer.write_table(name, data, metadata=header)
 
     @classmethod
     def read_coords_params(cls, fits, extname):
@@ -420,16 +432,23 @@ class Star(object):
         return coords, params
 
     @classmethod
-    def read(cls, fits, extname):
-        """Read stars from a FITS file.
+    def read(cls, reader, name):
+        """Read a list of stars via an open reader object.
 
-        :param fits:        An open fitsio.FITS object
-        :param extname:     The name of the extension to read from
-
-        :returns: a list of Star instances
+        :param reader:      A reader object that encapsulates the serialization format.
+        :param name:         Name associated with the stars in the serialized output.
+        :returns: a list of Star instances, or None if there aren't any
         """
-        assert extname in fits
-        colnames = fits[extname].get_colnames()
+        metadata = {}
+        data = reader.read_table(name, metadata)
+        if data is None:
+            return None
+
+        colnames = list(data.dtype.names)
+        if 'PARAMS_LENS' in metadata:
+            params_lens = np.atleast_1d(eval(metadata['PARAMS_LENS']))
+        else:
+            params_lens = None
 
         for key in ['x', 'y', 'u', 'v',
                     'dudx', 'dudy', 'dvdx', 'dvdy',
@@ -440,7 +459,6 @@ class Star(object):
         # These two might not be there, but if they are, remove them.
         colnames = [key for key in colnames if key not in ['reserve', 'flag_psf']]
 
-        data = fits[extname].read()
         x_list = data['x']
         y_list = data['y']
         u_list = data['u']
@@ -457,15 +475,26 @@ class Star(object):
         center = data['center']
         chisq = data['chisq']
 
+        # We didn't used to write dof.  Be graceful if it's not there.
+        if 'dof' in colnames:
+            dof = data['dof']
+            colnames.remove('dof')
+        else:
+            dof = [ None ] * len(data)
+
         if 'params' in colnames:
             params = data['params']
             colnames.remove('params')
+            if params_lens is not None:
+                params = [ StarFit.reshape_params(p, params_lens) for p in params ]
         else:
             params = [ None ] * len(data)
 
         if 'params_var' in colnames:
             params_var = data['params_var']
             colnames.remove('params_var')
+            if params_lens is not None:
+                params_var = [ StarFit.reshape_params(p, params_lens) for p in params_var ]
         else:
             params_var = [ None ] * len(data)
 
@@ -478,8 +507,8 @@ class Star(object):
         else:
             pointing_list = [ None ] * len(data)
 
-        fit_list = [ StarFit(p, flux=f, center=c, chisq=x, params_var=pv)
-                     for (p,f,c,x,pv) in zip(params, flux, center, chisq, params_var) ]
+        fit_list = [ StarFit(p, flux=f, center=c, chisq=x, dof=d, params_var=pv)
+                     for (p,f,c,x,d,pv) in zip(params, flux, center, chisq, dof, params_var) ]
 
         # The rest of the columns are the data properties
         prop_list = [ { c : row[c] for c in colnames } for row in data ]
@@ -893,7 +922,7 @@ class StarFit(object):
     to carry information of use to a given Model instance (such as intermediate
     results), but interpolators will be looking for some subset of these properties:
 
-    :params:      numpy vector of parameters of the PSF that apply to this star
+    :params:      numpy array of parameters of the PSF that apply to this star
     :params_var:  numpy array of variance error parameters of the PSF
     :flux:        flux of the star
     :center:      (u,v) tuple giving position of stellar center (relative
@@ -915,6 +944,7 @@ class StarFit(object):
     :param b:      Vector portion of design equation. Linear term of chi-squared dependence
                     on params about current values is -2 AT b.
     :param chisq:  chi-squared value at current parameters.
+    :param dof:    The number of degrees of freedom for the given chisq.
     """
     def __init__(self, params, flux=1., center=(0.,0.), params_var=None, A=None, b=None,
                  chisq=None, dof=None):
@@ -941,22 +971,72 @@ class StarFit(object):
     def beta(self):
         return self.A.T.dot(self.b)
 
-    def newParams(self, params, **kwargs):
+    @classmethod
+    def reshape_params(cls, params, params_lens):
+        new_params = []
+        i1 = 0
+        for plen in params_lens:
+            i2 = i1 + plen
+            new_params.append(params[i1:i2])
+            i1 = i2
+        return new_params
+
+    @classmethod
+    def flatten_params(cls, params):
+        return np.concatenate(params)
+
+    @property
+    def params_lens(self):
+        if isinstance(self.params, list):
+            return [len(p) for p in self.params]
+        else:
+            return None
+
+    def newParams(self, params, params_var=None, num=None, **kwargs):
         r"""Return new StarFit that has the array params installed as new parameters.
 
-        :param params:  A 1d array holding new parameters; must match size of current ones
-        :param \*\*kwargs:  Any other additional properties for the star. Takes current flux and
-                        center if not provided, and otherwise puts in None
+        :param params:      A 1d array holding new parameters; must match size of current ones
+        :param params_var:  A 1d array holding new parameter variances; if given, must match size
+                            of current ones.  [default: None]
+        :param num:         If there are multiple sets of model params being stored, then
+                            this is the number to update. [default: None]
+        :param \*\*kwargs:  Any other additional properties for the star.  Keeps current values
+                            of anything not given a new value.
 
         :returns: New StarFit object with altered parameters.  All chisq-related parameters
                   are set to None since they are no longer valid.
         """
-        npp = np.array(params)
-        if self.params is not None and npp.shape != self.params.shape:
+        old_params = self.get_params(num)
+        old_params_var = self.get_params_var(num)
+        if old_params is not None and np.array(params).shape != old_params.shape:
             raise ValueError('new StarFit parameters do not match dimensions of old ones')
-        flux = kwargs.pop('flux', self.flux)
-        center = kwargs.pop('center', self.center)
-        return StarFit(npp, flux=flux, center=center, **kwargs)
+
+        if num is not None:
+            new_params = self.params.copy()
+            new_params[num] = np.array(params)
+            kwargs['params'] = new_params
+            if params_var is not None:
+                new_params_var = self.params_var.copy()
+                new_params_var[num] = np.array(params_var)
+                kwargs['params_var'] = new_params_var
+        else:
+            kwargs['params'] = np.array(params)
+            if params_var is not None:
+                kwargs['params_var'] = np.array(params_var)
+
+        return self.withNew(**kwargs)
+
+    def get_params(self, num):
+        if num is not None and self.params is not None:
+            return self.params[num]
+        else:
+            return self.params
+
+    def get_params_var(self, num):
+        if num is not None and self.params_var is not None:
+            return self.params_var[num]
+        else:
+            return self.params_var
 
     def copy(self):
         return copy.deepcopy(self)

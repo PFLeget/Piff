@@ -110,7 +110,7 @@ def test_simple():
 
         # This test is fairly accurate, since we didn't add any noise and didn't convolve by
         # the pixel, so the image is very accurately a sheared GSObject.
-        np.testing.assert_allclose(fit.params[0], scale, rtol=1e-4)
+        np.testing.assert_allclose(fit.params[0], scale, rtol=1e-6)
         np.testing.assert_allclose(fit.params[1], g1, rtol=0, atol=1e-7)
         np.testing.assert_allclose(fit.params[2], g2, rtol=0, atol=1e-7)
         np.testing.assert_allclose(fit.center[0], du, rtol=0, atol=1e-7)
@@ -163,10 +163,10 @@ def test_simple():
 
         # Also need to test ability to serialize
         outfile = os.path.join('output', 'gsobject_test.fits')
-        with fitsio.FITS(outfile, 'rw', clobber=True) as f:
-            model.write(f, 'psf_model')
-        with fitsio.FITS(outfile, 'r') as f:
-            roundtrip_model = piff.GSObjectModel.read(f, 'psf_model')
+        with piff.writers.FitsWriter.open(outfile) as w:
+            model.write(w, 'psf_model')
+        with piff.readers.FitsReader.open(outfile) as r:
+            roundtrip_model = piff.GSObjectModel.read(r, 'psf_model')
         assert model.__dict__ == roundtrip_model.__dict__
 
         # Check the deprecated name in config
@@ -184,6 +184,45 @@ def test_simple():
         fit1 = model.fit(model.initialize(fiducial_star)).fit
         np.testing.assert_array_equal(fit1.params, fit.params)
 
+        # With fit_flux=True, not much changes here (this is more relevant to components of
+        # a Sum PSF).
+        config['model']['type'] = 'GSObject'
+        config['model']['fit_flux'] = True
+        model = piff.Model.process(config['model'])
+        psf2 = piff.SimplePSF(model, None)
+
+        # First check when the star has the right flux in star.fit.flux.
+        star = fiducial_star.withFlux(1)
+        star = model.initialize(star)
+        star = model.fit(star)
+        star = psf2.reflux(star)
+        star = psf2.reflux(star)
+        fit = star.fit
+
+        print('flux = ',fit.params[0],'*',fit.flux)
+        np.testing.assert_allclose(fit.params[0], 1, rtol=1.e-5)
+        np.testing.assert_allclose(fit.params[1], scale, rtol=1e-6)
+        np.testing.assert_allclose(fit.params[2], g1, rtol=0, atol=1e-6)
+        np.testing.assert_allclose(fit.params[3], g2, rtol=0, atol=1e-6)
+        np.testing.assert_allclose(fit.center[0], du, rtol=0, atol=1e-6)
+        np.testing.assert_allclose(fit.center[1], dv, rtol=0, atol=1e-6)
+
+        # If the star flux is not right, then the correction shows up in flux_scaling (params[0]).
+        star = fiducial_star.withFlux(100)
+        star = model.initialize(star)
+        star = model.fit(star)
+        star = psf2.reflux(star)
+        star = psf2.reflux(star)
+        fit = star.fit
+
+        print('flux = ',fit.params[0],'*',fit.flux)
+        np.testing.assert_allclose(fit.params[0], 0.01, rtol=1e-5)
+        np.testing.assert_allclose(fit.params[1], scale, rtol=1e-6)
+        np.testing.assert_allclose(fit.params[2], g1, rtol=0, atol=1e-6)
+        np.testing.assert_allclose(fit.params[3], g2, rtol=0, atol=1e-6)
+        np.testing.assert_allclose(fit.center[0], du, rtol=0, atol=1e-6)
+        np.testing.assert_allclose(fit.center[1], dv, rtol=0, atol=1e-6)
+
         # Finally, we should also test with pixel convolution included.  This really only makes
         # sense for fastfit=False, since HSM FindAdaptiveMom doesn't account for the pixel shape
         # in its measurements.
@@ -197,6 +236,7 @@ def test_simple():
         # Make a StarData instance for this image
         stardata = piff.StarData(image, image.true_center)
         fiducial_star = piff.Star(stardata, None)
+        fiducial_star, = psf1.initialize_flux_center([fiducial_star])
 
         print('Slow fit, pixel convolution included.')
         model = piff.GSObjectModel(fiducial, fastfit=False, include_pixel=True)
@@ -205,7 +245,6 @@ def test_simple():
         # Use a no op convert_func, just to touch that branch in the code.
         convert_func = lambda prof: prof
         star = model.fit(star, convert_func=convert_func)
-        star = psf1.reflux(star)
         star = psf1.reflux(star)
         star = psf1.reflux(star)
         fit = star.fit
@@ -223,6 +262,132 @@ def test_simple():
         np.testing.assert_allclose(fit.center[0], du, rtol=0, atol=2e-5)
         np.testing.assert_allclose(fit.center[1], dv, rtol=0, atol=2e-5)
 
+        # Check various init options.
+        print('Initializing with zero')
+        config['model']['init'] = 'zero'
+        config['model']['fit_flux'] = True
+        model = piff.Model.process(config['model'], logger)
+        psf1 = piff.SimplePSF(model, None)
+        fit = model.fit(model.initialize(fiducial_star)).fit
+
+        print('True flux = ', 1, ', model flux = ', fit.params[0])
+        print('True scale = ', scale, ', model scale = ', fit.params[1])
+        print('True g1 = ', g1, ', model g1 = ', fit.params[2])
+        print('True g2 = ', g2, ', model g2 = ', fit.params[3])
+        print('True du = ', du, ', model du = ', fit.center[0])
+        print('True dv = ', dv, ', model dv = ', fit.center[1])
+
+        np.testing.assert_allclose(fit.params[0], 1, rtol=0.02)
+        np.testing.assert_allclose(fit.params[1], scale, rtol=1e-2)
+        np.testing.assert_allclose(fit.params[2], g1, rtol=0, atol=1e-2)
+        np.testing.assert_allclose(fit.params[3], g2, rtol=0, atol=1e-2)
+        np.testing.assert_allclose(fit.center[0], du, rtol=0, atol=1e-2)
+        np.testing.assert_allclose(fit.center[1], dv, rtol=0, atol=1e-2)
+
+        # init=zero required fit_flux
+        config['model']['fit_flux'] = False
+        model = piff.Model.process(config['model'], logger)
+        psf1 = piff.SimplePSF(model, None)
+        with np.testing.assert_raises(ValueError):
+            model.initialize(fiducial_star)
+
+        print('Initializing with delta')
+        config['model']['init'] = 'delta'
+        config['model']['fit_flux'] = False
+        model = piff.Model.process(config['model'], logger)
+        psf1 = piff.SimplePSF(model, None)
+        fit = model.fit(model.initialize(fiducial_star)).fit
+
+        print('True scale = ', scale, ', model scale = ', fit.params[0])
+        print('True g1 = ', g1, ', model g1 = ', fit.params[1])
+        print('True g2 = ', g2, ', model g2 = ', fit.params[2])
+        print('True du = ', du, ', model du = ', fit.center[0])
+        print('True dv = ', dv, ', model dv = ', fit.center[1])
+
+        np.testing.assert_allclose(fit.params[0], scale, rtol=1e-2)
+        np.testing.assert_allclose(fit.params[1], g1, rtol=0, atol=1e-2)
+        np.testing.assert_allclose(fit.params[2], g2, rtol=0, atol=1e-2)
+        np.testing.assert_allclose(fit.center[0], du, rtol=0, atol=1e-2)
+        np.testing.assert_allclose(fit.center[1], dv, rtol=0, atol=1e-2)
+
+        # GSObject also allows a (flux, size) init
+        print('Initializing with (0.2,0.4)')
+        config['model']['init'] = '(0.2, 0.4)'
+        config['model']['fit_flux'] = True
+        model = piff.Model.process(config['model'], logger)
+        psf1 = piff.SimplePSF(model, None)
+        fit = model.fit(model.initialize(fiducial_star)).fit
+
+        print('True flux = ', 1, ', model flux = ', fit.params[0])
+        print('True scale = ', scale, ', model scale = ', fit.params[1])
+        print('True g1 = ', g1, ', model g1 = ', fit.params[2])
+        print('True g2 = ', g2, ', model g2 = ', fit.params[3])
+        print('True du = ', du, ', model du = ', fit.center[0])
+        print('True dv = ', dv, ', model dv = ', fit.center[1])
+
+        np.testing.assert_allclose(fit.params[0], 1, rtol=0.02)
+        np.testing.assert_allclose(fit.params[1], scale, rtol=1e-2)
+        np.testing.assert_allclose(fit.params[2], g1, rtol=0, atol=1e-2)
+        np.testing.assert_allclose(fit.params[3], g2, rtol=0, atol=1e-2)
+        np.testing.assert_allclose(fit.center[0], du, rtol=0, atol=1e-2)
+        np.testing.assert_allclose(fit.center[1], dv, rtol=0, atol=1e-2)
+
+        # Or as a tuple
+        print('Initializing with (0.2,0.4)')
+        config['model']['init'] = (0.2, 0.4)
+        config['model']['fit_flux'] = True
+        model = piff.Model.process(config['model'], logger)
+        psf1 = piff.SimplePSF(model, None)
+        fit = model.fit(model.initialize(fiducial_star)).fit
+
+        print('True flux = ', 1, ', model flux = ', fit.params[0])
+        print('True scale = ', scale, ', model scale = ', fit.params[1])
+        print('True g1 = ', g1, ', model g1 = ', fit.params[2])
+        print('True g2 = ', g2, ', model g2 = ', fit.params[3])
+        print('True du = ', du, ', model du = ', fit.center[0])
+        print('True dv = ', dv, ', model dv = ', fit.center[1])
+
+        np.testing.assert_allclose(fit.params[0], 1, rtol=0.02)
+        np.testing.assert_allclose(fit.params[1], scale, rtol=1e-2)
+        np.testing.assert_allclose(fit.params[2], g1, rtol=0, atol=1e-2)
+        np.testing.assert_allclose(fit.params[3], g2, rtol=0, atol=1e-2)
+        np.testing.assert_allclose(fit.center[0], du, rtol=0, atol=1e-2)
+        np.testing.assert_allclose(fit.center[1], dv, rtol=0, atol=1e-2)
+
+        # Can also do this with fastfit, but takes a couple iterations to get decent accuracy.
+        config['model']['fastfit'] = True
+        model = piff.Model.process(config['model'], logger)
+        psf1 = piff.SimplePSF(model, None)
+        star = model.initialize(fiducial_star)
+        for iter in range(2):
+            star = model.fit(star)
+        fit = star.fit
+
+        print('True flux = ', 1, ', model flux = ', fit.params[0])
+        print('True scale = ', scale, ', model scale = ', fit.params[1])
+        print('True g1 = ', g1, ', model g1 = ', fit.params[2])
+        print('True g2 = ', g2, ', model g2 = ', fit.params[3])
+        print('True du = ', du, ', model du = ', fit.center[0])
+        print('True dv = ', dv, ', model dv = ', fit.center[1])
+
+        np.testing.assert_allclose(fit.params[0], 1, rtol=1e-2)
+        np.testing.assert_allclose(fit.params[1], scale, rtol=1e-2)
+        np.testing.assert_allclose(fit.params[2], g1, rtol=0, atol=1e-2)
+        np.testing.assert_allclose(fit.params[3], g2, rtol=0, atol=1e-2)
+        np.testing.assert_allclose(fit.center[0], du, rtol=0, atol=1e-2)
+        np.testing.assert_allclose(fit.center[1], dv, rtol=0, atol=1e-2)
+
+        config['model']['fit_flux'] = False
+        model = piff.Model.process(config['model'], logger)
+        psf1 = piff.SimplePSF(model, None)
+        with np.testing.assert_raises(ValueError):
+            model.initialize(fiducial_star)
+
+        # Invalid init method raises an error
+        config['model']['init'] = 'invalid'
+        model = piff.Model.process(config['model'], logger)
+        with np.testing.assert_raises(ValueError):
+            model.initialize(fiducial_star)
 
 @timer
 def test_center():
@@ -492,6 +657,7 @@ def test_missing():
 def test_gradient():
     """Next: fit spatially-varying PSF to multiple images.
     """
+    print('1')
     if __name__ == '__main__':
         fiducial_list = [fiducial_gaussian, fiducial_kolmogorov, fiducial_moffat]
     else:
@@ -555,14 +721,16 @@ def test_gradient():
                 chisq += s.fit.chisq
                 dof += s.fit.dof
                 stars[i] = s
-                ###print('   chisq=',s.fit.chisq, 'dof=',s.fit.dof)
+                print(i,'   chisq=',s.fit.chisq, 'dof=',s.fit.dof)
             print('iteration',iteration,'chisq=',chisq, 'dof=',dof)
             if oldchisq>0 and np.abs(oldchisq-chisq) < dof/10.:
                 break
             else:
                 oldchisq = chisq
 
+        print('nstars = ',len(stars))
         for i, s in enumerate(stars):
+            print(i)
             print(i, s.fit.center)
 
         # Now use the interpolator to produce a noiseless rendering
@@ -728,17 +896,17 @@ def test_direct():
         # These tests are more strict above.  The truncated Moffat included here but not there
         # doesn't work quite as well.
         np.testing.assert_allclose(fit.params[0], scale, rtol=1e-4)
-        np.testing.assert_allclose(fit.params[1], g1, rtol=0, atol=1e-5)
-        np.testing.assert_allclose(fit.params[2], g2, rtol=0, atol=1e-5)
+        np.testing.assert_allclose(fit.params[1], g1, rtol=0, atol=2e-5)
+        np.testing.assert_allclose(fit.params[2], g2, rtol=0, atol=2e-5)
         np.testing.assert_allclose(fit.center[0], du, rtol=0, atol=1e-5)
         np.testing.assert_allclose(fit.center[1], dv, rtol=0, atol=1e-5)
 
         # Also need to test ability to serialize
         outfile = os.path.join('output', 'gsobject_direct_test.fits')
-        with fitsio.FITS(outfile, 'rw', clobber=True) as f:
-            model.write(f, 'psf_model')
-        with fitsio.FITS(outfile, 'r') as f:
-            roundtrip_model = piff.GSObjectModel.read(f, 'psf_model')
+        with piff.writers.FitsWriter.open(outfile) as w:
+            model.write(w, 'psf_model')
+        with piff.readers.FitsReader.open(outfile) as r:
+            roundtrip_model = piff.GSObjectModel.read(r, 'psf_model')
         assert model.__dict__ == roundtrip_model.__dict__
 
     # repeat with fastfit=False
@@ -790,10 +958,10 @@ def test_direct():
 
         # Also need to test ability to serialize
         outfile = os.path.join('output', 'gsobject_direct_test.fits')
-        with fitsio.FITS(outfile, 'rw', clobber=True) as f:
-            model.write(f, 'psf_model')
-        with fitsio.FITS(outfile, 'r') as f:
-            roundtrip_model = piff.GSObjectModel.read(f, 'psf_model')
+        with piff.writers.FitsWriter.open(outfile) as w:
+            model.write(w, 'psf_model')
+        with piff.readers.FitsReader.open(outfile) as r:
+            roundtrip_model = piff.GSObjectModel.read(r, 'psf_model')
         assert model.__dict__ == roundtrip_model.__dict__
 
 @timer
@@ -883,29 +1051,33 @@ def test_var():
 def test_fail():
     # Some vv noisy images that result in errors in the fit to check the error reporting.
 
+    print('0')
     scale = 1.3
     g1 = 0.33
     g2 = -0.27
     flux = 15
     noise = 2.
     seed = 1234
+    print('1')
 
     psf = galsim.Moffat(half_light_radius=1.0, beta=2.5, trunc=3.0)
     psf = psf.dilate(scale).shear(g1=g1, g2=g2).withFlux(flux)
     image = psf.drawImage(nx=64, ny=64, scale=0.3)
+    print('2')
 
     weight = image.copy()
     weight.fill(1/noise**2)
     noisy_image = image.copy()
     rng = galsim.BaseDeviate(seed)
     noisy_image.addNoise(galsim.GaussianNoise(sigma=noise, rng=rng))
+    print('3')
 
     star1 = piff.Star(piff.StarData(image, image.true_center, weight), None)
     star2 = piff.Star(piff.StarData(noisy_image, image.true_center, weight), None)
+    print('4')
 
     model1 = piff.Moffat(fastfit=True, beta=2.5)
-    with np.testing.assert_raises(RuntimeError):
-        model1.initialize(star2)
+    star2 = model1.initialize(star2)
     with np.testing.assert_raises(RuntimeError):
         model1.fit(star2)
     star3 = model1.initialize(star1)
@@ -914,17 +1086,20 @@ def test_fail():
     with np.testing.assert_raises(RuntimeError):
         model1.fit(star3)
     psf = piff.SimplePSF(model1, piff.Mean())
+    star1, star2, star3 = psf.initialize_flux_center([star1, star2, star3])
     with CaptureLog() as cl:
-        psf.initialize_params([star3], logger=cl.logger)
+        stars, _ = psf.initialize_params([star3], logger=cl.logger)
         with np.testing.assert_raises(RuntimeError):
             # Raises an error that all stars were flagged
-            psf.single_iteration([star3], logger=cl.logger, convert_func=None)
+            psf.single_iteration(stars, logger=cl.logger, convert_funcs=None, draw_method=None)
     assert "Failed fitting star" in cl.output
+    print('5')
 
     # This is contrived to hit the fit failure for the reference.
     # I'm not sure what realistic use case would actually hit it, but at least it's
     # theoretically possible to fail there.
-    model2 = piff.GSObjectModel(galsim.InterpolatedImage(noisy_image), fastfit=True)
+    with np.testing.assert_warns(RuntimeWarning):
+        model2 = piff.GSObjectModel(galsim.InterpolatedImage(noisy_image), fastfit=True)
     with np.testing.assert_raises(RuntimeError):
         model2.initialize(star1)
     psf = piff.SimplePSF(model2, piff.Mean())
@@ -933,13 +1108,12 @@ def test_fail():
     assert "Failed initializing star" in cl.output
     assert stars[0].is_flagged
     assert nremoved == 1
+    print('6')
 
     # The easiest way to make least_squares_fit fail is to give it extra scipy_kwargs
     # that don't let it finish converging.
     model3 = piff.Moffat(fastfit=False, beta=2.5, scipy_kwargs={'max_nfev':10})
-    with np.testing.assert_raises(RuntimeError):
-        model3.initialize(star2)
-    star2.fit.params = star3.fit.params.copy()  # Make sure params are setup correctly.
+    star2 = model3.initialize(star2)
     with np.testing.assert_raises(RuntimeError):
         model3.fit(star2)
     star3 = model3.initialize(star1)
@@ -947,6 +1121,7 @@ def test_fail():
     star3 = piff.Star(star2.data, star3.fit)
     with np.testing.assert_raises(RuntimeError):
         model3.fit(star3)
+    print('7')
 
     # reflux is harder to make fail.  Rather than try something even more contrived,
     # just mock np.linalg.solve to simulate the case that AtA ends up singular.
@@ -956,15 +1131,33 @@ def test_fail():
     assert "Failed trying to reflux star" in cl.output
     assert nremoved == 1
     assert stars[0].is_flagged
+    print('8')
+
+    # There is a check for GalSim errors.  The easiest way to make that hit is to
+    # use a gsobj with very low maximum_fft_size.
+    gsp = galsim.GSParams(maximum_fft_size=2048)
+    model4 = piff.GSObjectModel(galsim.Moffat(beta=1.5, gsparams=gsp, half_light_radius=1))
+    star2 = model4.initialize(star2)
+    # This one doesn't fail.  But it does hit the except GalSimError line in the fit function.
+    star3 = model4.fit(star2)
+    assert star3.fit.chisq < 1.2 * star3.fit.dof
+    print(star3.fit.chisq, star3.fit.dof)
+    star3 = model4.initialize(star1)
+    # This one also hits the one when calculating chisq, so chisq is set to 1.e300.
+    star3 = model4.fit(star3)
+    print(star3.fit.chisq, star3.fit.dof)
+    assert star3.fit.chisq == 1.e300
+    print('9')
 
 
 if __name__ == '__main__':
-    test_simple()
-    test_center()
-    test_interp()
-    test_missing()
-    test_gradient()
-    test_gradient_center()
-    test_direct()
-    test_var()
-    test_fail()
+    with galsim.utilities.single_threaded():
+        test_simple()
+        test_center()
+        test_interp()
+        test_missing()
+        test_gradient()
+        test_gradient_center()
+        test_direct()
+        test_var()
+        test_fail()

@@ -42,6 +42,8 @@ class Polynomial(Interp):
     An interpolator that uses  scipy curve_fit command to fit a polynomial
     surface to each parameter passed in independently.
 
+    Use type name "Polynomial" in a config field to use this interpolant.
+
     :param order:       The maximum order in the polynomial. i.e. the maximum
                         value of i+j where p(u,v) = sum c_{ij} x^i y^j.
                         [required, unless orders is given]
@@ -74,6 +76,7 @@ class Polynomial(Interp):
             'orders' : orders,
             'poly_type' : poly_type
         }
+        self.set_num(None)
 
     def _setup_indices(self, nparam):
         """An internal function that sets up the indices, given the number of parameters
@@ -237,7 +240,7 @@ class Polynomial(Interp):
 
         :returns: a new list of Star instances
         """
-        parameters = np.array([s.fit.params for s in stars]).T
+        parameters = np.array([s.fit.get_params(self._num) for s in stars]).T
         positions = np.array([self.getProperties(s) for s in stars]).T
         nparam = len(parameters)
         self._setup_indices(nparam)
@@ -263,7 +266,7 @@ class Polynomial(Interp):
         # We will want to index things later, so useful
         # to convert these to numpy arrays and transpose
         # them to the order we need.
-        parameters = np.array([s.fit.params for s in stars]).T
+        parameters = np.array([s.fit.get_params(self._num) for s in stars]).T
         positions = np.array([self.getProperties(s) for s in stars]).T
 
         # We should have the same number of parameters as number of polynomial
@@ -276,15 +279,13 @@ class Polynomial(Interp):
                     "polynomial type %s with %d positions",
                     nparam,self.poly_type,npos)
 
-        coeffs = []
-
         # This model function adapts our _interpolationModel method
         # into the form that the scipy curve_fit function is expecting.
         # It just needs to unpack a linear exploded list of coefficients
         # into the matrix form that _interpolationModel wants.
 
-
         # Loop through the parameters
+        coeffs = []
         for i, parameter in enumerate(parameters):
 
             def model(uv,*coeffs):
@@ -295,9 +296,11 @@ class Polynomial(Interp):
             # a single parameter vector for scipy to fit.
             p0 = self._pack_coefficients(i, self._initialGuess(positions, parameter, i))
 
+            if len(parameter) < len(p0):
+                raise RuntimeError("Too few constraints for solution. (Probably too few stars)")
+
             logger.debug("Fitting parameter %d from initial guess %s "
                          "with polynomial order %d", i, p0, self._orders[i])
-
 
             # Black box curve fitter from scipy!
             # We may want to look into the tolerance and other parameters
@@ -306,7 +309,7 @@ class Polynomial(Interp):
             with warnings.catch_warnings():
                 # scipy.optimize has a tendency to emit warnings.  Let's ignore them.
                 warnings.simplefilter("ignore", scipy.optimize.OptimizeWarning)
-                p,covmat=scipy.optimize.curve_fit(model, positions, parameter, p0)
+                p, covmat = scipy.optimize.curve_fit(model, positions, parameter, p0)
 
             # Build up the list of outputs, one for each parameter
             coeffs.append(self._unpack_coefficients(i,p))
@@ -317,11 +320,10 @@ class Polynomial(Interp):
         # self._unpack_coefficients
         self.coeffs = coeffs
 
-    def _finish_write(self, fits, extname):
-        """Write the solution to a FITS binary table.
+    def _finish_write(self, writer):
+        """Write the solution.
 
-        :param fits:        An open fitsio.FITS object.
-        :param extname:     The base name of the extension
+        :param writer:      A writer object that encapsulates the serialization format.
         """
         if self.coeffs is None:
             raise RuntimeError("Coeffs not set yet.  Cannot write this Polynomial.")
@@ -365,20 +367,19 @@ class Polynomial(Interp):
 
         # Finally, write all of this to a FITS table.
         data = np.array(list(zip(*cols)), dtype=dtypes)
-        fits.write_table(data, extname=extname + '_solution', header=header)
+        writer.write_table('solution', data, metadata=header)
 
 
-    def _finish_read(self, fits, extname):
-        """Read the solution from a fits file.
+    def _finish_read(self, reader):
+        """Read the solution.
 
-        :param fits:        An open fitsio.FITS object.
-        :param extname:     The base name of the extension
+        :param reader:      A reader object that encapsulates the serialization format.
         """
         # Read the solution extension.
-        data = fits[extname + '_solution'].read()
-        header = fits[extname + '_solution'].read_header()
-
-        self.nparam = header['NPARAM']
+        metadata = {}
+        data = reader.read_table('solution', metadata=metadata)
+        assert data is not None
+        self.nparam = metadata['NPARAM']
 
         # Run setup functions to get these values right.
         self._set_function(self.poly_type)
@@ -404,5 +405,5 @@ class Polynomial(Interp):
         """
         pos = self.getProperties(star)
         p = [self._interpolationModel(pos, coeff) for coeff in self.coeffs]
-        fit = star.fit.newParams(p)
+        fit = star.fit.newParams(p, num=self._num)
         return Star(star.data, fit)

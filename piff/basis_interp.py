@@ -54,6 +54,7 @@ class BasisInterp(Interp):
         self.degenerate_points = True  # This Interpolator uses chisq quadratic forms
         self.use_qr = False  # The default.  May be overridden by subclasses.
         self.q = None
+        self.set_num(None)
 
     def initialize(self, stars, logger=None):
         """Initialize both the interpolator to some state prefatory to any solve iterations and
@@ -67,7 +68,7 @@ class BasisInterp(Interp):
 
         :returns:           A new list of Stars which have their parameters initialized.
         """
-        c = np.mean([s.fit.params for s in stars], axis=0)
+        c = np.mean([s.fit.get_params(self._num) for s in stars], axis=0)
         self.q = c[:,np.newaxis] * self.constant(1.)[np.newaxis,:]
         stars = self.interpolateList(stars)
         return stars
@@ -323,7 +324,7 @@ class BasisInterp(Interp):
 
         K = self.basis(star)
         p = np.dot(self.q,K)
-        fit = star.fit.newParams(p)
+        fit = star.fit.newParams(p, num=self._num)
         return Star(star.data, fit)
 
 
@@ -339,6 +340,8 @@ class BasisPolynomial(BasisInterp):
     All combinations of powers of keys that have total order <= max_order are used.
     The maximum order is normally the maximum order of any given key's order, but you may
     specify a larger value.  (e.g. to use 1, x, y, xy, you would specify order=1, max_order=2.)
+
+    Use type name "BasisPolynomial" in a config field to use this interpolant.
 
     :param order:       The order to use for each key.  Can be a single value (applied to all
                         keys) or an array matching number of keys.
@@ -431,11 +434,10 @@ class BasisPolynomial(BasisInterp):
         out[0] = value  # The constant term is always first.
         return out
 
-    def _finish_write(self, fits, extname):
-        """Write the solution to a FITS binary table.
+    def _finish_write(self, writer):
+        """Write the solution.
 
-        :param fits:        An open fitsio.FITS object.
-        :param extname:     The base name of the extension.
+        :param writer:      A writer object that encapsulates the serialization format.
         """
         if self.q is None:
             raise RuntimeError("Solution not set yet.  Cannot write this BasisPolynomial.")
@@ -443,14 +445,14 @@ class BasisPolynomial(BasisInterp):
         dtypes = [ ('q', float, self.q.shape) ]
         data = np.zeros(1, dtype=dtypes)
         data['q'] = self.q
-        fits.write_table(data, extname=extname + '_solution')
+        writer.write_table('solution', data)
 
-    def _finish_read(self, fits, extname):
-        """Read the solution from a FITS binary table.
+    def _finish_read(self, reader):
+        """Read the solution.
 
-        :param fits:        An open fitsio.FITS object.
-        :param extname:     The name of the extension with the interpolator information.
+        :param reader:      A reader object that encapsulates the serialization format.
         """
-        data = fits[extname + '_solution'].read()
+        data = reader.read_table('solution')
+        assert data is not None
         self.q = data['q'][0]
 

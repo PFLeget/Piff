@@ -27,6 +27,8 @@ class KNNInterp(Interp):
     An interpolator that uses sklearn KNeighborsRegressor to interpolate a
     single surface
 
+    Use type name "KNN" or "KNearestNeighbors" in a config field to use this interpolant.
+
     :param keys:        A list of star attributes to interpolate from [default: ('u', 'v')]
     :param n_neighbors: Number of neighbors used for interpolation. [default: 15]
     :param weights:     Weight function used in prediction. Possible values are 'uniform',
@@ -59,6 +61,7 @@ class KNNInterp(Interp):
 
         from sklearn.neighbors import KNeighborsRegressor
         self.knn = KNeighborsRegressor(**self.knr_kwargs)
+        self.set_num(None)
 
     @property
     def property_names(self):
@@ -115,51 +118,50 @@ class KNNInterp(Interp):
         """
         return stars
 
-    def solve(self, star_list, logger=None):
+    def solve(self, stars, logger=None):
         """Solve for the interpolation coefficients given stars and attributes
 
-        :param star_list:   A list of Star instances to interpolate between
+        :param stars:       A list of Star instances to interpolate between
         :param logger:      A logger object for logging debug info. [default: None]
         """
-        locations = np.array([self.getProperties(star) for star in star_list])
-        targets = np.array([star.fit.params for star in star_list])
+        locations = np.array([self.getProperties(star) for star in stars])
+        targets = np.array([star.fit.get_params(self._num) for star in stars])
         self._fit(locations, targets)
 
     def interpolate(self, star, logger=None):
-        """Perform the interpolation to find the interpolated parameter vector at some position. Calls interpolateList because sklearn prefers list input anyways
+        """Perform the interpolation to find the interpolated parameter vector at some position.
 
         :param star:        A Star instance to which one wants to interpolate
         :param logger:      A logger object for logging debug info. [default: None]
 
         :returns: a new Star instance with its StarFit member holding the interpolated parameters
         """
-        # because of sklearn formatting, call interpolateList and take 0th entry
+        # Just call interpolateList because sklearn prefers list input anyways
         return self.interpolateList([star], logger=logger)[0]
 
-    def interpolateList(self, star_list, logger=None):
+    def interpolateList(self, stars, logger=None):
         """Perform the interpolation for a list of stars.
 
-        :param star_list:   A list of Star instances to which to interpolate.
+        :param stars:       A list of Star instances to which to interpolate.
         :param logger:      A logger object for logging debug info. [default: None]
 
         :returns: a list of new Star instances with interpolated parameters
         """
         logger = galsim.config.LoggerWrapper(logger)
-        locations = np.array([self.getProperties(star) for star in star_list])
+        locations = np.array([self.getProperties(star) for star in stars])
         targets = self._predict(locations)
-        star_list_fitted = []
-        for yi, star in zip(targets, star_list):
-            fit = star.fit.newParams(yi)
-            star_list_fitted.append(Star(star.data, fit))
-        return star_list_fitted
+        stars_fitted = []
+        for yi, star in zip(targets, stars):
+            fit = star.fit.newParams(yi, num=self._num)
+            stars_fitted.append(Star(star.data, fit))
+        return stars_fitted
 
-    def _finish_write(self, fits, extname):
-        """Write the solution to a FITS binary table.
+    def _finish_write(self, writer):
+        """Write the solution.
 
         Save the knn params and the locations and targets arrays
 
-        :param fits:        An open fitsio.FITS object.
-        :param extname:     The base name of the extension with the interp information.
+        :param writer:      A writer object that encapsulates the serialization format.
         """
 
         dtypes = [('LOCATIONS', self.locations.dtype, self.locations.shape),
@@ -170,16 +172,14 @@ class KNNInterp(Interp):
         data['LOCATIONS'] = self.locations
         data['TARGETS'] = self.targets
 
-        # write to fits
-        fits.write_table(data, extname=extname + '_solution')
+        writer.write_table('solution', data)
 
-    def _finish_read(self, fits, extname):
-        """Read the solution from a FITS binary table.
+    def _finish_read(self, reader):
+        """Read the solution.
 
-        :param fits:        An open fitsio.FITS object.
-        :param extname:     The base name of the extension with the interp information.
+        :param reader:      A reader object that encapsulates the serialization format.
         """
-        data = fits[extname + '_solution'].read()
+        data = reader.read_table('solution')
 
         # self.locations and self.targets assigned in _fit
         self._fit(data['LOCATIONS'][0], data['TARGETS'][0])

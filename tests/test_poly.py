@@ -339,10 +339,10 @@ def poly_load_save_sub(type1, type2, fname):
     extname = "interp"
     dirname = 'output'
     filename=os.path.join(dirname, fname)
-    with fitsio.FITS(filename,'rw',clobber=True) as f:
-        interp.write(f, extname=extname)
-    with fitsio.FITS(filename, "r") as f2:
-        interp2 = piff.Polynomial.read(f2, extname=extname)
+    with piff.writers.FitsWriter.open(filename) as w:
+        interp.write(w, extname)
+    with piff.readers.FitsReader.open(filename) as r:
+        interp2 = piff.Polynomial.read(r, extname)
 
     # The type and other parameters should now have been overwritten and updated
     assert interp2.poly_type == interp.poly_type
@@ -363,8 +363,7 @@ def poly_load_save_sub(type1, type2, fname):
 
 @timer
 def test_poly_raise():
-    # Test that we can serialize and deserialize a polynomial
-    # interpolator correctly.  Copying all this stuff from above:
+    # Test some things that should raise exceptions.
 
     np_rng = np.random.RandomState(1234)
     nparam = 3
@@ -380,7 +379,15 @@ def test_poly_raise():
     data = [ piff.Star.makeTarget(u=p[0], v=p[1]).data for p in pos ]
     fit = [ piff.StarFit(v) for v in vectors ]
     stars = [ piff.Star(d, f) for d,f in zip(data, fit) ]
-    np.testing.assert_raises(ValueError, interp.solve, stars)
+    with np.testing.assert_raises(ValueError):
+        interp.solve(stars)
+
+    # If there are fewer stars than parameters, it should fail with an appropriate message.
+    vectors = [ np_rng.random_sample(size=nparam) for i in range(3) ]
+    fit = [ piff.StarFit(v) for v in vectors ]
+    stars = [ piff.Star(d, f) for d,f in zip(data, fit) ]
+    with np.testing.assert_raises(RuntimeError):
+        interp.solve(stars)
 
     # Invalid construction
     np.testing.assert_raises(TypeError, piff.Polynomial)
@@ -389,9 +396,9 @@ def test_poly_raise():
 
     # Cannot write before running fit.
     filename = 'output/test_invalid.fits'
-    with fitsio.FITS(filename,'rw',clobber=True) as f:
+    with piff.writers.FitsWriter.open(filename) as w:
         with np.testing.assert_raises(RuntimeError):
-            interp.write(f, extname='junk')
+            interp.write(w, 'junk')
 
 
 @timer

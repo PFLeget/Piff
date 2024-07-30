@@ -50,6 +50,8 @@ class GPInterp(Interp):
     or anisotropically.  There are also options to use the traditional maximum likelihood
     optimization or no optimization if preferred.  See the ``optimizer`` parameter below.
 
+    Use type name "GP" or "GaussianProcess" in a config field to use this interpolant.
+
     :param keys:         A list of keys for properties that will be interpolated.  Must be 2
                          properties, which can be used to calculate a 2-point correlation
                          function. [default: ('u','v')]
@@ -135,6 +137,7 @@ class GPInterp(Interp):
             'optimizer': optimizer,
             'kernel': kernel
         }
+        self.set_num(None)
 
         if isinstance(kernel,str):
             self.kernel_template = [kernel]
@@ -202,7 +205,7 @@ class GPInterp(Interp):
         :param logger:  A logger object for logging debug info. [default: None]
         """
         if self.rows is None:
-            self.nparams = len(stars[0].fit.params)
+            self.nparams = len(stars[0].fit.get_params(self._num))
             self.rows = np.arange(0, self.nparams, 1).astype(int)
         else:
             self.nparams = len(self.rows)
@@ -241,8 +244,8 @@ class GPInterp(Interp):
         :param logger:   A logger object for logging debug info. [default: None]
         """
         X = np.array([self.getProperties(star) for star in stars])
-        y = np.array([star.fit.params for star in stars])
-        y_err = np.sqrt(np.array([star.fit.params_var for star in stars]))
+        y = np.array([star.fit.get_params(self._num) for star in stars])
+        y_err = np.sqrt(np.array([star.fit.get_params_var(self._num) for star in stars]))
 
         y = np.array([y[:,i] for i in self.rows]).T
         y_err = np.array([y_err[:,i] for i in self.rows]).T
@@ -279,17 +282,21 @@ class GPInterp(Interp):
         gp_y = self._predict(Xstar)
         fitted_stars = []
         for y0, star in zip(gp_y, stars):
-            if star.fit.params is None:
+            if star.fit.get_params(self._num) is None:
                 y0_updated = np.zeros(self.nparams)
             else:
-                y0_updated = star.fit.params
+                y0_updated = star.fit.get_params(self._num)
             for j in range(self.nparams):
                 y0_updated[self.rows[j]] = y0[j]
-            fit = star.fit.newParams(y0_updated)
+            fit = star.fit.newParams(y0_updated, num=self._num)
             fitted_stars.append(Star(star.data, fit))
         return fitted_stars
 
-    def _finish_write(self, fits, extname):
+    def _finish_write(self, writer):
+        """Finish the writing process with any class-specific steps.
+
+        :param writer:      A writer object that encapsulates the serialization format.
+        """
         # Note, we're only storing the training data and hyperparameters here, which means the
         # Cholesky decomposition will have to be re-computed when this object is read back from
         # disk.
@@ -312,10 +319,15 @@ class GPInterp(Interp):
         data['ROWS'] = self.rows
         data['OPTIMIZER'] = self.optimizer
 
-        fits.write_table(data, extname=extname+'_kernel')
+        writer.write_table('kernel', data)
 
-    def _finish_read(self, fits, extname):
-        data = fits[extname+'_kernel'].read()
+    def _finish_read(self, reader):
+        """Finish the reading process with any class-specific steps.
+
+        :param reader:      A reader object that encapsulates the serialization format.
+        """
+        data = reader.read_table('kernel')
+        assert data is not None
         # Run fit to set up GP, but don't actually do any hyperparameter optimization. Just
         # set the GP up using the current hyperparameters.
         # Need to give back average fits files if needed.

@@ -103,6 +103,46 @@ def test_simplest():
     np.testing.assert_raises(ValueError, piff.PixelGrid, du, 0)
     np.testing.assert_raises(ValueError, piff.PixelGrid, du, -32)
 
+    # Check with init=zero
+    mod = piff.PixelGrid(du, 32, interp, centered=False, init='zero')
+    star = mod.initialize(s)
+    # This one needs a few iterations, since zero is a pretty bad initial guess.
+    for iter in range(3):
+        star = mod.fit(star)
+    star = psf.reflux(star)
+    print('Flux when init=zero:', star.fit.flux)
+    np.testing.assert_allclose(star.fit.flux, influx, rtol=1.e-3)
+
+    # Check with init=delta
+    mod = piff.PixelGrid(du, 32, interp, centered=False, init='delta')
+    star = mod.initialize(s)
+    star = mod.fit(star)
+    star = psf.reflux(star)
+    print('Flux when init=delta:', star.fit.flux)
+    np.testing.assert_allclose(star.fit.flux, influx, rtol=1.e-3)
+
+    # Check with fit_flux=True
+    mod = piff.PixelGrid(du, 32, interp, centered=False, fit_flux=True)
+    star = mod.initialize(star)
+    star = mod.fit(star)
+    print('Flux when fit_flux=True:', star.fit.flux, np.sum(star.fit.params))
+    np.testing.assert_allclose(star.fit.flux, influx, rtol=1.e-3)
+    np.testing.assert_allclose(np.sum(star.fit.params), 1, rtol=1.e-3)
+    np.testing.assert_allclose(mod.getProfile(star.fit.params).flux, 1, rtol=1.e-3)
+
+    star = star.withFlux(100 * influx)
+    star = mod.initialize(star)
+    star = mod.fit(star)
+    print('Flux when fit_flux=True, star flux = 100X:', star.fit.flux, np.sum(star.fit.params))
+    np.testing.assert_allclose(star.fit.flux, 100*influx, rtol=1.e-3)
+    np.testing.assert_allclose(np.sum(star.fit.params), 0.01, rtol=1.e-3)
+    np.testing.assert_allclose(mod.getProfile(star.fit.params).flux, 0.01, rtol=1.e-3)
+
+    # Invalid init method raises an error
+    mod = piff.PixelGrid(du, 32, interp, init='invalid')
+    with np.testing.assert_raises(ValueError):
+        mod.initialize(star)
+
 
 @timer
 def test_oversample():
@@ -319,9 +359,9 @@ def test_basis_interp():
     np.testing.assert_raises(RuntimeError, basis.solve, [star])
     np.testing.assert_raises(RuntimeError, basis.interpolate, star)
     file_name = os.path.join('output','test_basis_interp.fits')
-    with fitsio.FITS(file_name,'rw',clobber=True) as fout:
+    with piff.writers.FitsWriter.open(file_name) as w:
         with np.testing.assert_raises(RuntimeError):
-            basis.write(fout, extname='basis')
+            basis.write(w, 'basis')
 
     # Other options for order
     basis = piff.BasisPolynomial(order=2)
@@ -1015,19 +1055,17 @@ def test_single_image():
         test_star = psf.drawStar(target_star)
         np.testing.assert_almost_equal(test_star.image.array/2., test_im.array/2., decimal=3)
 
-    # test copy_image property of drawStar and draw
-    for draw in [psf.drawStar, psf.model.draw]:
-        target_star_copy = psf.interp.interpolate(piff.Star(target_star.data.copy(), target_star.fit.copy()))  # interp is so that when we do psf.model.draw we have fit.params to work with
-
-        test_star_copy = draw(target_star_copy, copy_image=True)
-        test_star_nocopy = draw(target_star_copy, copy_image=False)
-        # if we modify target_star_copy, then test_star_nocopy should be modified, but not test_star_copy
-        target_star_copy.image.array[0,0] = 23456
-        assert test_star_nocopy.image.array[0,0] == target_star_copy.image.array[0,0]
-        assert test_star_copy.image.array[0,0] != target_star_copy.image.array[0,0]
-        # however the other pixels SHOULD still be all the same value
-        assert test_star_nocopy.image.array[1,1] == target_star_copy.image.array[1,1]
-        assert test_star_copy.image.array[1,1] == target_star_copy.image.array[1,1]
+    # test copy_image property of draw
+    target_star_copy = psf.interp.interpolate(target_star)
+    test_star_copy = psf.model.draw(target_star_copy, copy_image=True)
+    test_star_nocopy = psf.model.draw(target_star_copy, copy_image=False)
+    # if we modify target_star_copy, then test_star_nocopy should be modified, but not test_star_copy
+    target_star_copy.image.array[0,0] = 23456
+    assert test_star_nocopy.image.array[0,0] == target_star_copy.image.array[0,0]
+    assert test_star_copy.image.array[0,0] != target_star_copy.image.array[0,0]
+    # however the other pixels SHOULD still be all the same value
+    assert test_star_nocopy.image.array[1,1] == target_star_copy.image.array[1,1]
+    assert test_star_copy.image.array[1,1] == target_star_copy.image.array[1,1]
 
     # check that drawing onto an image does not return a copy
     image = psf.draw(x=x0, y=y0)
@@ -1665,6 +1703,54 @@ def test_color():
                                   # Anyway, I think the fit is working, just this test doesn't
                                   # seem quite the right thing.
 
+@timer
+def test_convert_func():
+    """Test PixelGrid fitting with a non-trivial convert_func
+    """
+
+    # This is the kind of convert_func that might be used by ConvolvePSF
+    # Start without noise and where the image is exactly representable by the converted PixelGrid.
+
+    optics = galsim.OpticalPSF(lam=500, diam=8,
+                               aberrations=[0.0,0.0,0.0,0.0,0.7,-0.8,0.7,0.5,0.7,-0.6,0.5,0.8],
+                               obscuration=0.4)
+    gauss = galsim.Gaussian(sigma=0.2)
+    delta = galsim.DeltaFunction()
+
+    convert_funcs = [
+        lambda prof: prof,
+        lambda prof: prof.shear(g1=0.2, g2=-0.05),
+        lambda prof: prof.dilate(1.12),
+        lambda prof: prof.shift(dx=0.1, dy=-0.05),
+        lambda prof: galsim.Convolve(prof, delta),
+        lambda prof: galsim.Convolve(prof, gauss),
+        lambda prof: galsim.Convolve(prof, optics),
+        lambda prof: prof + galsim.Convolve(gauss, optics),
+    ]
+
+    size = 5
+    scale = 0.2
+    flux = 1.e5
+    interp = galsim.Lanczos(7)
+    model_im = galsim.Gaussian(sigma=0.3).drawImage(nx=size,ny=size, scale=scale, method='no_pixel')
+    model_im /= model_im.array.sum()
+    model_ii = galsim.InterpolatedImage(model_im, x_interpolant=interp, use_true_center=False)
+
+    for k, convert_func in enumerate(convert_funcs):
+        print('Test convert_func #',k)
+        prof = convert_func(model_ii)
+
+        star = piff.Star.makeTarget(x=0, y=0, u=0, v=0, scale=0.2, stamp_size=32, flux=flux)
+        prof.withFlux(flux).drawImage(image=star.image, center=star.image_pos, method='no_pixel')
+
+        mod = piff.PixelGrid(scale, size, interp)
+        star1 = mod.initialize(star).withFlux(flux=np.sum(star.image.array))
+        star1 = mod.fit(star1, convert_func=convert_func)
+        print('true params = ',model_im.array.ravel())
+        print('fitted params = ',star1.fit.params)
+        np.testing.assert_allclose(star1.fit.params, model_im.array.ravel(), rtol=2.e-3)
+
+
 if __name__ == '__main__':
     #import cProfile, pstats
     #pr = cProfile.Profile()
@@ -1684,6 +1770,7 @@ if __name__ == '__main__':
     test_des2()
     test_var()
     test_color()
+    test_convert_func()
     #pr.disable()
     #ps = pstats.Stats(pr).sort_stats('tottime')
     #ps.print_stats(20)
